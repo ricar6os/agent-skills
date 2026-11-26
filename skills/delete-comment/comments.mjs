@@ -2,21 +2,45 @@ import { execFileSync } from "node:child_process";
 import { readFileSync, writeFileSync } from "node:fs";
 import { createRequire } from "node:module";
 import path from "node:path";
-import { pathToFileURL } from "node:url";
 
 const root = execFileSync("git", ["rev-parse", "--show-toplevel"]).toString().trim();
 const require = createRequire(path.join(root, "package.json"));
-const parser = require(
-  require.resolve("@typescript-eslint/parser", {
-    paths: [require.resolve("eslint-config-next")],
-  }),
-);
-const { isDirective } = await import(
-  pathToFileURL(path.join(root, "scripts/eslint/no-comments.mts")).href
-);
+
+function loadParser() {
+  for (const via of [undefined, "typescript-eslint", "eslint-config-next"]) {
+    try {
+      const options = via ? { paths: [require.resolve(via)] } : undefined;
+      return require(require.resolve("@typescript-eslint/parser", options));
+    } catch {
+      continue;
+    }
+  }
+  console.error(
+    "comments.mjs needs @typescript-eslint/parser: add it to the project's dev dependencies.",
+  );
+  process.exit(2);
+}
+
+const directive =
+  /^\s*(eslint-disable|eslint-enable|eslint\s|global\s|globals\s|exported\s|@ts-(expect-error|ignore|nocheck|check)\b|prettier-ignore|biome-ignore|oxlint-(disable|enable)|deno-lint-ignore|stylelint-(disable|enable)|(istanbul|c8|v8) ignore|@(vitest|jest)-environment\s|@jsx(ImportSource|Runtime|Frag)?\s|@flow\b|@refresh\s|@license\b|@preserve\b|[#@] sourceMappingURL=|webpack[A-Z]\w*:|turbopackIgnore:|[#@]__(PURE|NO_SIDE_EFFECTS)__|<reference\s|!)/;
+
+function isDirective(comment) {
+  if (comment.type === "Shebang") return true;
+  const tripleSlash = comment.type === "Line" && comment.value.startsWith("/");
+  const text = tripleSlash ? comment.value.slice(1) : comment.value;
+  return directive.test(text.replace(/^\*+/, ""));
+}
 
 const code = /\.(ts|tsx|js|jsx|mjs|cjs|mts|cts)$/;
-const skipped = /(^|\/)(_generated|catalogs)\/|^\.agents\/|^\.claude\//;
+const defaultSkip =
+  /(^|\/)(_generated|generated|__generated__|vendor|dist|build|out|coverage)\/|\.min\.(js|css)$|^\.agents\/|^\.claude\//;
+
+const argv = process.argv.slice(2);
+const skipAt = argv.indexOf("--skip");
+const extraSkip = skipAt === -1 ? undefined : new RegExp(argv.splice(skipAt, 2)[1]);
+const skipped = { test: (f) => defaultSkip.test(f) || (extraSkip?.test(f) ?? false) };
+
+let parser;
 
 function trackedFiles(paths) {
   const args = ["ls-files", "--", ...(paths.length ? paths : ["."])];
@@ -27,6 +51,7 @@ function trackedFiles(paths) {
 }
 
 function parse(text, file) {
+  parser ??= loadParser();
   return parser.parse(text, {
     range: true,
     loc: true,
@@ -40,12 +65,14 @@ function parse(text, file) {
 
 function commentsOf(text, file) {
   if (file.endsWith(".css")) {
-    return [...text.matchAll(/\/\*[\s\S]*?\*\//g)].map((m) => ({
-      range: [m.index, m.index + m[0].length],
-      start: text.slice(0, m.index).split("\n").length,
-      end: text.slice(0, m.index + m[0].length).split("\n").length,
-      standalone: true,
-    }));
+    return [...text.matchAll(/\/\*[\s\S]*?\*\//g)]
+      .filter((m) => !isDirective({ type: "Block", value: m[0].slice(2, -2) }))
+      .map((m) => ({
+        range: [m.index, m.index + m[0].length],
+        start: text.slice(0, m.index).split("\n").length,
+        end: text.slice(0, m.index + m[0].length).split("\n").length,
+        standalone: true,
+      }));
   }
   return parse(text, file)
     .comments.filter((c) => !isDirective(c))
@@ -126,7 +153,10 @@ function remove(blocks) {
     const abs = path.join(root, file);
     const text = readFileSync(abs, "utf8");
     for (const b of fileBlocks) {
-      const now = text.split("\n").slice(b.start - 1, b.end).join("\n");
+      const now = text
+        .split("\n")
+        .slice(b.start - 1, b.end)
+        .join("\n");
       if (b.text !== undefined && now !== b.text) {
         throw new Error(`${file}:${b.start} changed since it was listed; list again.`);
       }
@@ -153,7 +183,9 @@ function remove(blocks) {
 function tokens(text, file) {
   if (file.endsWith(".css")) return [text.replace(/\/\*[\s\S]*?\*\//g, "").replace(/\s+/g, "")];
   return parse(text, file)
-    .tokens.map((t) => `${t.type}:${t.type === "JSXText" ? t.value.replace(/\s+/g, " ").trim() : t.value}`)
+    .tokens.map(
+      (t) => `${t.type}:${t.type === "JSXText" ? t.value.replace(/\s+/g, " ").trim() : t.value}`,
+    )
     .filter((t) => t !== "JSXText:")
     .join("\n")
     .replace(/Punctuator:\{\nPunctuator:\}\n/g, "")
@@ -180,7 +212,7 @@ function verify(base) {
   return { checked: changed.length, differ };
 }
 
-const [command, ...args] = process.argv.slice(2);
+const [command, ...args] = argv;
 if (command === "list") {
   console.log(JSON.stringify(list(args), null, 1));
 } else if (command === "delete") {
@@ -191,6 +223,8 @@ if (command === "list") {
   console.log(JSON.stringify(result, null, 1));
   if (result.differ.length) process.exit(1);
 } else {
-  console.error("Usage: comments.mjs list [paths…] | delete <blocks.json> | verify [base]");
+  console.error(
+    "Usage: comments.mjs list [paths…] | delete <blocks.json> | verify [base]  [--skip <regex>]",
+  );
   process.exit(2);
 }
