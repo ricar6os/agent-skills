@@ -1,4 +1,4 @@
-# Personal agent instructions
+# agent-skills
 
 Shared global instructions for Codex and Claude Code. Edit `AGENTS.md` to update the policy for both tools. `CLAUDE.md` imports it for Claude Code sessions in this repository.
 
@@ -25,7 +25,7 @@ of globally. The `skills` CLI copies each one into `.agents/skills/` (read by Co
 from `.claude/skills/`, and records its source and hash in `skills-lock.json`:
 
 ```sh
-npx skills add ricar6os/agents-skills --skill review-react-effects --skill update-js-dependencies -a claude-code -a codex -y
+npx skills add ricar6os/agent-skills --skill review-react-effects --skill update-js-dependencies -a claude-code -a codex -y
 npx skills update -p   # pull later fixes
 ```
 
